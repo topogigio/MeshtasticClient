@@ -3,7 +3,7 @@
 [![Version](https://shields.io)](https://github.com)
 [![License](https://shields.io)](https://creativecommons.org)
 [![Python](https://shields.io)](https://python.org)
-[![JavaScript](https://shields.io)](https://mozilla.org)
+[![JavaScript](https://shields.io)](https://developer.mozilla.org/)
 
 **Meshtastic Serial Client** is a cross-platform client application (Windows, macOS, Linux) designed to interface with Meshtastic radio nodes via serial connection. The application combines a powerful Python backend with a modern and intuitive web-based user interface.
 
