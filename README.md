@@ -13,7 +13,7 @@ Developed by **Andrea Marotta - IU0CRY**.
 
 ## 🚀 Key Features
 
-- **Cross-platform**: 100% compatible with Windows, macOS, and Linux.
+- **Cross-platform**: 100% compatible with Windows, MacOS, and Linux.
 - **Automatic Port Detection**: Automatically identifies the device's serial port (usbmodem, COM, ttyACM/ttyUSB).
 - **Smart Reconnection**: Handles hardware disconnects with an advanced cooldown and polling system to restore the connection without restarting the app.
 - **Integrated Traceroute**: Asynchronous MeshTraceService to monitor packet paths on the mesh network.
