@@ -31,7 +31,6 @@
 # To view a copy of the full legal code of this license, visit:
 # https://creativecommons.org
 # ----------------------------------------------------------------------------------------------
-
 import asyncio
 import threading
 import platform
@@ -42,6 +41,7 @@ import re
 import time
 import meshtastic
 import meshtastic.serial_interface
+import meshtastic.tcp_interface  # <--- AGGIUNTO SUPPORTO TCP
 import pubsub.pub
 import base64
 import os
@@ -49,14 +49,20 @@ import webbrowser
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-from fastapi.responses import Response
-from fastapi.responses import FileResponse  
+from fastapi.responses import HTMLResponse, Response, FileResponse  
 from fastapi.middleware.cors import CORSMiddleware
 from pubsub import pub
 from google.protobuf.json_format import MessageToDict
 from serial import SerialException
 from meshtastic.serial_interface import SerialInterface
+from meshtastic.tcp_interface import TCPInterface  # <--- AGGIUNTO SUPPORTO TCP
+
+# ==============================================================================================
+# LETTURA CONFIGURAZIONE DA VARIABILI D'AMBIENTE (Risolto conflitto Uvicorn)
+# ==============================================================================================
+CONFIG_MODE = os.environ.get("MESHTASTIC_MODE", "serial")  
+CONFIG_TARGET = os.environ.get("MESHTASTIC_TARGET", "").strip()
+
 
 def open_browser():
     try:
@@ -72,45 +78,65 @@ def open_browser():
         print(f"Browser aperto usando default su http://127.0.0.1:8000/")
         #return False
  
-async def handle_node_reconnect(port_path, websocket):
-    global iface_global # Aggiornerà la variabile globale usata dal tuo server
-    
+async def handle_node_reconnect(target_path, websocket):
+    global iface_global
     print("Fase 1: Cooldown hardware (12 secondi)...")
     await asyncio.sleep(12.0)
     
-    print("Fase 2: Polling della porta seriale...")
+    print(f"Fase 2: Tentativo di riconnessione a {target_path}...")
     max_attempts = 20
     
     for attempt in range(max_attempts):
         try:
-            # SerialInterface è bloccante, la eseguiamo in un thread separato per non congelare asyncio
             loop = asyncio.get_running_loop()
-            new_iface = await loop.run_in_executor(
-                None, 
-                lambda: SerialInterface(devPath=port_path, noProto=False)
-            )
+            if CONFIG_MODE == "wifi":
+                new_iface = await loop.run_in_executor(
+                    None, lambda: TCPInterface(hostname=target_path)
+                )
+            else:
+                new_iface = await loop.run_in_executor(
+                    None, lambda: SerialInterface(devPath=target_path, noProto=False)
+                )
             
-            # Fase 3: Validazione
             if new_iface.myInfo:
-                iface_global = new_iface # Ripristina l'interfaccia globale per i prossimi messaggi
-                print("Fase 3: Riconnessione riuscita e nodo validato!")
+                iface_global = new_iface
+                print("Fase 3: Riconnessione riuscita!")
                 
-                # Notifica la UI che tutto è tornato online e i controlli possono essere sbloccati
+                # ====================================================================
+                # AGGIUNTO: SPINGI I NODI DALLA CACHE DOPO IL REBOOT DI RETE
+                # ====================================================================
+                if new_iface.nodes:
+                    print(f"[*] Ripristino di {len(new_iface.nodes)} nodi in corso...")
+                    for node_id, node_data in new_iface.nodes.items():
+                        pacchetto_iniziale = {
+                            "type": "nodeinfo",
+                            "from": str(node_id),
+                            "node": node_data,
+                            "radio": node_data.get("radio", {})
+                        }
+                        if "raw" in pacchetto_iniziale["node"]: 
+                            del pacchetto_iniziale["node"]["raw"]
+                        
+                        # Li inviamo direttamente al server websocket attivo
+                        await websocket.send_text(json.dumps(pacchetto_iniziale))
+                # ====================================================================
+
+                # Avvisa l'interfaccia grafica che tutto è pronto e sbloccato
                 await websocket.send_text(json.dumps({
                     "type": "node_ready",
                     "message": "Nodo riconnesso con successo!"
                 }))
                 return
-                
-        except (SerialException, Exception) as e:
-            print(f"Tentativo {attempt + 1} fallito (nodo non ancora pronto)...")
+        except Exception:
+            print(f"Tentativo {attempt + 1} fallito, riprovo...")
             await asyncio.sleep(1.5)
             
-    print("Timeout: Il nodo non ha risposto nei tempi previsti.")
     await websocket.send_text(json.dumps({
         "type": "node_timeout",
         "message": "Impossibile riconnettersi al nodo automaticamente."
     }))
+
+
 
 class MeshTraceService:
 
@@ -207,10 +233,14 @@ def fmt_node_id(nid):
         return ""
     return s
 
-def lettura_seriale(porta, loop):
+def lettura_nodo(target, loop):
     try:
-        interface = meshtastic.serial_interface.SerialInterface(porta)
-        print(f"[*] Connesso al tracker su {porta}")
+        if CONFIG_MODE == "wifi":
+            interface = TCPInterface(hostname=target)
+            print(f"[*] Connessione TCP stabilita con successo su {target}")
+        else:
+            interface = SerialInterface(target)
+            print(f"[*] Connessione SERIALE stabilita con successo su {target}")
 
         global iface_global
         iface_global = interface
@@ -423,33 +453,48 @@ def lettura_seriale(porta, loop):
         
         pub.subscribe(onReceive, "meshtastic.receive")
 
-        # -------------------------
+   	    # -------------------------
         # SEND LOOP
         # -------------------------
         def send_message(message):
             global iface_global
             iface_global.sendText(message)
 
+
         while True:
             text = input("")
             send_message(text)
+			
+        while iface_global and not iface_global.noProto:
+            time.sleep(1)
 
+        print("[!] L'interfaccia Meshtastic ha chiuso la connessione.")
     except Exception as e:
-        print(f"[!] Errore seriale: {e}")
-        
+        print(f"[!] Errore di inizializzazione sul target {target}: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    porta = trova_usbmodem()
-    if porta:
-        loop = asyncio.get_running_loop()
-        thread = threading.Thread(
-            target=lettura_seriale, args=(porta, loop), daemon=True
-        )
-        thread.start()
-        threading.Thread(target=open_browser, daemon=True).start()        
+    target_connessione = None
+    
+    if CONFIG_MODE == "wifi":
+        target_connessione = CONFIG_TARGET
+        print(f"[*] Modalità Wi-Fi impostata su IP: {target_connessione}")
+    elif CONFIG_MODE == "serial" and CONFIG_TARGET:
+        target_connessione = CONFIG_TARGET
+        print(f"[*] Modalità Seriale impostata su porta: {target_connessione}")
     else:
-        print("[!] Attenzione: Nessun TRACKER L1 rilevato.")
+        print("[*] Nessun parametro specifico. Tento l'autodetect USB...")
+        target_connessione = trova_usbmodem()
+        
+    if target_connessione:
+        loop = asyncio.get_running_loop()
+        thread = threading.Thread(target=lettura_nodo, args=(target_connessione, loop), daemon=True)
+        thread.start()
+        threading.Thread(target=open_browser, daemon=True).start()
+    else:
+        print("[!] Errore: Nessun dispositivo configurato o rilevato in rete/seriale.")
     yield
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -485,10 +530,8 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # 🔥 INIT CANALI
         if iface_global:
-
             try:
                 channels = []
-
                 for ch in iface_global.localNode.channels:
                     channels.append({
                         "index": getattr(ch, "index", 0),
@@ -503,12 +546,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "init",
                     "channels": channels
                 }))
-
                 print("[WS] INIT inviato")
-
             except Exception as e:
                 print("[WS INIT ERROR]:", e)
 
+        # 🔥 INVIA CONFIGURAZIONE
         if iface_global:
             try:
                 config = {
@@ -546,12 +588,59 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "config",
                     "config": config
                 }))
+                print("[WS] CONFIG inviata")
             except Exception as e:
                 print("[CONFIG ERROR]", e)
+
+        # ====================================================================
+        # 🔥 NUOVO - AGGIUNTO: SPINGI I NODI DALLA CACHE ALL'APERTURA DEL WS
+        # ====================================================================
+        if iface_global and hasattr(iface_global, 'nodes') and iface_global.nodes:
+            try:
+                print(f"[*] Invio iniziale di {len(iface_global.nodes)} nodi dalla cache...")
+                for node_id, node_data in iface_global.nodes.items():
+                    # Sanatizziamo l'oggetto dai dati 'raw' per evitare problemi di serializzazione JSON
+                    nodo_pulito = json.loads(json.dumps(node_data, default=str))
+                    if "raw" in nodo_pulito:
+                        del nodo_pulito["raw"]
+                        
+                    pacchetto_iniziale = {
+                        "type": "nodeinfo",
+                        "from": str(node_id),
+                        "node": {
+                            "id": str(node_id),
+                            "id_display": nodo_pulito.get("user", {}).get("id", str(node_id)),
+                            "longName": nodo_pulito.get("user", {}).get("longName"),
+                            "shortName": nodo_pulito.get("user", {}).get("shortName"),
+                            "role": nodo_pulito.get("user", {}).get("role"),
+                            "model": nodo_pulito.get("user", {}).get("hwModel"),
+                            "radio": {
+                                "lastRssi": nodo_pulito.get("snr"), # Fallback snr/rssi se presenti
+                                "lastSnr": nodo_pulito.get("snr")
+                            },
+                            "messages": [],
+                            "user": nodo_pulito.get("user", {})
+                        },
+                        "radio": {}
+                    }
+                    
+                    await websocket.send_text(json.dumps(pacchetto_iniziale))
+                
+                # Segnala al frontend che la sincronizzazione iniziale è completata
+                await websocket.send_text(json.dumps({
+                    "type": "node_ready",
+                    "message": "Nodi caricati dalla cache!"
+                }))
+            except Exception as e:
+                print("[WS NODES INIT ERROR]:", e)
+        # ====================================================================
     
-        # 🔁 LOOP MESSAGGI
+        # 🔁 LOOP MESSAGGI IN INGRESSO DAL FRONTEND
         while True:
             comando_web = await websocket.receive_text()
+            # ... (Tutto il resto del tuo codice dentro il loop 'while True' rimane identico) ...
+			
+
 
             try:
                 msg = json.loads(comando_web)
