@@ -485,7 +485,7 @@ def lettura_nodo(target, loop):
         
         pub.subscribe(onReceive, "meshtastic.receive")
 
-   	    # -------------------------
+   	# -------------------------
         # SEND LOOP
         # -------------------------
         def send_message(message):
