@@ -78,8 +78,20 @@ def open_browser():
         print(f"Browser aperto usando default su http://127.0.0.1:8000/")
         #return False
  
+ 
+
+
 async def handle_node_reconnect(target_path, websocket):
     global iface_global
+    
+    # Chiudiamo in modo pulito l'interfaccia morta prima di attendere
+    if iface_global:
+        try:
+            iface_global.close()
+        except:
+            pass
+        iface_global = None
+
     print("Fase 1: Cooldown hardware (12 secondi)...")
     await asyncio.sleep(12.0)
     
@@ -87,6 +99,7 @@ async def handle_node_reconnect(target_path, websocket):
     max_attempts = 20
     
     for attempt in range(max_attempts):
+        new_iface = None
         try:
             loop = asyncio.get_running_loop()
             if CONFIG_MODE == "wifi":
@@ -98,43 +111,62 @@ async def handle_node_reconnect(target_path, websocket):
                     None, lambda: SerialInterface(devPath=target_path, noProto=False)
                 )
             
-            if new_iface.myInfo:
-                iface_global = new_iface
+            # Verifica sicura sull'inizializzazione del nodo
+            if new_iface and getattr(new_iface, "myInfo", None):
                 print("Fase 3: Riconnessione riuscita!")
                 
-                # ====================================================================
-                # AGGIUNTO: SPINGI I NODI DALLA CACHE DOPO IL REBOOT DI RETE
-                # ====================================================================
-                if new_iface.nodes:
-                    print(f"[*] Ripristino di {len(new_iface.nodes)} nodi in corso...")
-                    for node_id, node_data in new_iface.nodes.items():
-                        pacchetto_iniziale = {
-                            "type": "nodeinfo",
-                            "from": str(node_id),
-                            "node": node_data,
-                            "radio": node_data.get("radio", {})
-                        }
-                        if "raw" in pacchetto_iniziale["node"]: 
-                            del pacchetto_iniziale["node"]["raw"]
-                        
-                        # Li inviamo direttamente al server websocket attivo
-                        await websocket.send_text(json.dumps(pacchetto_iniziale))
-                # ====================================================================
+                # Assegniamo subito l'istanza globale così il lettore in background la intercetta
+                iface_global = new_iface
+                
+                # Svuotamento della cache dei nodi protetto da disconnessioni e oggetti non serializzabili
+                try:
+                    if new_iface.nodes:
+                        print(f"[*] Ripristino di {len(new_iface.nodes)} nodi in corso...")
+                        for node_id, node_data in new_iface.nodes.items():
+                            # Creiamo una copia pulita del nodo per eliminare gli oggetti complessi nativi
+                            nodo_pulito = {}
+                            for k, v in node_data.items():
+                                if k == "raw":  # Salta il buffer binario grezzo
+                                    continue
+                                
+                                # Se il valore ha un metodo o dizionario interno, lo convertiamo in dati puri
+                                if hasattr(v, "to_dict"):
+                                    nodo_pulito[k] = v.to_dict()
+                                elif hasattr(v, "__dict__"):
+                                    nodo_pulito[k] = vars(v)
+                                else:
+                                    nodo_pulito[k] = v
 
-                # Avvisa l'interfaccia grafica che tutto è pronto e sbloccato
+                            pacchetto_iniziale = {
+                                "type": "nodeinfo",
+                                "from": str(node_id),
+                                "node": nodo_pulito,
+                                "radio": nodo_pulito.get("radio", {})
+                            }
+                            
+                            await websocket.send_text(json.dumps(pacchetto_iniziale))
+                except Exception as node_err:
+                    print(f"[!] Avviso durante invio nodi cache: {node_err}")
+
+                # Comunica al browser che il nodo è pronto
                 await websocket.send_text(json.dumps({
                     "type": "node_ready",
                     "message": "Nodo riconnesso con successo!"
                 }))
                 return
-        except Exception:
-            print(f"Tentativo {attempt + 1} fallito, riprovo...")
-            await asyncio.sleep(1.5)
+        except Exception as e:
+            print(f"Tentativo {attempt + 1} fallito ({e}), riprovo...")
+            if new_iface:
+                try: new_iface.close()
+                except: pass
+            await asyncio.sleep(2.0)
             
     await websocket.send_text(json.dumps({
         "type": "node_timeout",
         "message": "Impossibile riconnettersi al nodo automaticamente."
     }))
+
+
 
 
 
@@ -525,6 +557,7 @@ async def get():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global iface_global  # <--- AGGIUNGI QUESTA RIGA QUI!
     await manager.connect(websocket)
     
     try:
@@ -1149,6 +1182,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     trigger_module = "bluetooth"
                                 else:
                                     trigger_module = "security"
+                                
                                 print(f"Scrittura configurazione critica ({trigger_module}). Innesco reboot...")
                                 
                                 await websocket.send_text(json.dumps({
@@ -1156,17 +1190,27 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "message": "Il nodo richiede il riavvio hardware per applicare le modifiche LoRa/Network..."
                                 }))
                                 
+                                # 1. Salviamo il percorso (IP o Seriale) PRIMA di chiudere l'interfaccia
+                                port_path = getattr(iface_global, "devPath", None) or getattr(iface_global, "hostname", "Rete_TCP")
+                                
+                                # 2. Inviamo il comando di scrittura config alla MCU
                                 try:
-                                    # Invia il comando specifico che fa riavviare la MCU
                                     iface_global.localNode.writeConfig(trigger_module)
-                                    await asyncio.sleep(0.2)
-                                    iface_global.close()
+                                    await asyncio.sleep(0.4)  # Diamo il tempo al pacchetto di uscire verso il socket
                                 except Exception:
-                                    pass # Ignora la caduta immediata della seriale
-
-                                port_path = iface_global.devPath
-                                asyncio.create_task(handle_node_reconnect(port_path, websocket))
-                            
+                                    pass
+                                
+                                # 3. Disconnessione preventiva e pulizia per evitare il crash 10054
+                                if iface_global:
+                                    print("[*] Disconnessione preventiva dell'interfaccia prima del riavvio hardware...")
+                                    try:
+                                        iface_global.close()
+                                    except:
+                                        pass
+                                    iface_global = None  # Sganciamo la variabile globale
+                                
+                                # 4. Lanciamo l'ascoltatore per la riconnessione automatica
+                                asyncio.create_task(handle_node_reconnect(port_path, websocket))                            
                             else:
                                 # Se abbiamo modificato solo moduli flash (device/position/display/power), il nodo NON si riavvia.
                                 # Possiamo rispondere subito con l'ACK standard alla UI
@@ -1188,8 +1232,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        
-# --- INTERFACCIA WEB COMPLETA ---
+
 html_content = """
 <!DOCTYPE html>
 <html>
