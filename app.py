@@ -2149,29 +2149,28 @@ function connettiWebSocket() {
             
             const con = document.getElementById("msgInput");
             const msg = con.value;
-        
-            if (data.ok) {      
-                // Trova l'indice del '!'
-				let idNodo = dest;
-				const indice = dest.indexOf('!');
-				
-				if (indice !== -1) {
-					// Taglia dall'indice del '!' fino alla fine della stringa
-					idNodo = dest.substring(indice);
-					console.log("NODO PURGATO"); // Output: !3d6e2a1b
-					console.log(idNodo); // Output: !3d6e2a1b
-				}  
+            
+			// Trova l'indice del '!'
+			let idNodo = dest;
+			const indice = dest.indexOf('!');
+			
+			if (indice !== -1) {
+				// Taglia dall'indice del '!' fino alla fine della stringa
+				idNodo = dest.substring(indice);
+				console.log(idNodo); // Output: !3d6e2a1b
+			}  
           
+            if (data.ok) {      
                 const msgEl = addMessage("🟢 Percorso verificato <br>a: " + idNodo + "<br>" + messaggioOld, "sending");
                 msgInput.value = "";
             } else {
                 msgInput.value = "";
-                const msgEl = addMessage("🔴 Destinazione non raggiungibile<br>" + dest, "error");
+                const msgEl = addMessage("🔴 Destinazione non raggiungibile<br>a: " + idNodo, "error");
             }
 
             return;
         }
-
+		
         // =====================================================
         // 💬 CHAT MESSAGE
         // =====================================================
