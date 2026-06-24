@@ -57,12 +57,42 @@ from serial import SerialException
 from meshtastic.serial_interface import SerialInterface
 from meshtastic.tcp_interface import TCPInterface  # <--- AGGIUNTO SUPPORTO TCP
 
+# SE SEI CONNESSO VIA USB:
+# Aggiungi noNodes=True all'inizializzazione
+#iface_global = meshtastic.serial_interface.SerialInterface(noNodes=True)
+# SE SEI CONNESSO VIA WI-FI/RETE:
+#iface_global = meshtastic.tcp_interface.TCPInterface(hostname="111.222.33.44", noNodes=True)
+
 # ==============================================================================================
 # LETTURA CONFIGURAZIONE DA VARIABILI D'AMBIENTE (Risolto conflitto Uvicorn)
 # ==============================================================================================
 CONFIG_MODE = os.environ.get("MESHTASTIC_MODE", "serial")  
 CONFIG_TARGET = os.environ.get("MESHTASTIC_TARGET", "").strip()
 
+def formatta_nodo_meshtastic(nodo_input):
+    """
+    Converte un Node ID (decimale o esadecimale) nel formato standard Meshtastic con '!'.
+    Gestisce input con spazi, maiuscole, prefissi '0x' o già formattati.
+    """
+    # Rimuove spazi bianchi all'inizio e alla fine
+    stringa_pulita = str(nodo_input).strip()
+    
+    # Caso 1: Ha già il punto esclamativo -> Lo restituisce tutto in minuscolo
+    if stringa_pulita.startswith('!'):
+        return stringa_pulita.lower()
+        
+    # Caso 2: È un numero decimale -> Lo converte in esadecimale a 8 cifre
+    if stringa_pulita.isdigit():
+        valore_decimale = int(stringa_pulita)
+        # hex() genera es. '0x3d6e0a1b', rimuoviamo '0x' con [2:] e allineiamo a 8 caratteri
+        valore_esadecimale = hex(valore_decimale)[2:].zfill(8)
+        return f"!{valore_esadecimale.lower()}"
+        
+    # Caso 3: È un esadecimale puro senza ! (gestisce anche eventuale prefisso '0x')
+    if stringa_pulita.lower().startswith('0x'):
+        stringa_pulita = stringa_pulita[2:]
+        
+    return f"!{stringa_pulita.lower()}"
 
 def open_browser():
     try:
@@ -77,9 +107,6 @@ def open_browser():
         webbrowser.open("http://127.0.0.1:8000/")
         print(f"Browser aperto usando default su http://127.0.0.1:8000/")
         #return False
- 
- 
-
 
 async def handle_node_reconnect(target_path, websocket):
     global iface_global
@@ -165,10 +192,6 @@ async def handle_node_reconnect(target_path, websocket):
         "type": "node_timeout",
         "message": "Impossibile riconnettersi al nodo automaticamente."
     }))
-
-
-
-
 
 class MeshTraceService:
 
@@ -395,6 +418,8 @@ def lettura_nodo(target, loop):
                     nodo["radio"]["lastSnr"] = packet.get("rxSnr")
                 
                     msg_type = "nodeinfo"
+
+                    node_id = formatta_nodo_meshtastic(node_id)
                 
                     pacchetto = {
                         "type": msg_type,
@@ -439,6 +464,8 @@ def lettura_nodo(target, loop):
                         "text": message or "",
                         "time": packet.get("rxTime")
                     })
+
+                    node_id = formatta_nodo_meshtastic(node_id)
         
                     pacchetto = {
                         "type": "chat",
@@ -1284,21 +1311,37 @@ html_content = """
     </style>
 </head>
 <body>
-<div class="navbar" style="display: flex; align-items: center; width: 100%; box-sizing: border-box;">
-        <div style="display: flex; align-items: stretch; gap: 10px;">
-            <span style="display: flex; align-items: center;">📡 Meshtastic Client</span>        
-            <div style="display: flex; align-items: center; border: 1px solid #ffffff; 
-                padding: 5px 15px; border-radius: 6px; background-color: #000000; color: #ffffff;">
-                <button class="chat-btn" onclick="cancellaCronologia()">❌ Elimina</button>
-            </div>      
-            <div style="display: flex; align-items: center; gap: 15px; border: 1px solid #ffffff; 
-                padding: 5px 15px; border-radius: 6px; background-color: #000000; color: #ffffff;">
-                <button id="saveConfigBtn" class="chat-btn">💾 Salva Configurazione</button>        
-                <div id="syncBadge">Synced</div>
-            </div>
-        </div>
-        <div id="status" class="status-badge offline" style="margin-left: auto; display: flex; align-items: center;">Connessione...</div>
-    </div>
+	<div class="navbar" style="display: flex; align-items: center; justify-content: center; width: 100%; 
+	box-sizing: border-box; position: relative; padding: 0 20px; height: 50px;">
+		
+		<!-- Scritta ancorata stabilmente a SINISTRA -->
+		<span style="position: absolute; left: 20px; display: flex; align-items: center; f
+		ont-weight: bold;">📡 Meshtastic Client</span>        
+		
+		<!-- Contenitore dei pulsanti perfettamente CENTRATO nella pagina -->
+		<div style="display: flex; align-items: stretch; gap: 10px;">
+			<div style="display: flex; align-items: center; border: 1px solid #ffffff; 
+				padding: 5px 15px; border-radius: 6px; background-color: #000000; color: #ffffff;">
+				<button class="chat-btn" onclick="cancellaCronologia()">❌ Messaggi</button>
+			</div>      
+			
+			<div style="display: flex; align-items: center; gap: 15px; border: 1px solid #ffffff; 
+				padding: 5px 15px; border-radius: 6px; background-color: #000000; color: #ffffff;">
+				<button id="saveConfigBtn" class="chat-btn">💾 Configurazione</button>        
+				<div id="syncBadge">Synced</div>
+			</div>
+			
+			<!-- Box Pulsanti Nodi -->
+			<div style="display: flex; align-items: center; gap: 10px; border: 1px solid #ffffff; 
+				padding: 5px 15px; border-radius: 6px; background-color: #000000; color: #ffffff;">
+				<button class="chat-btn" onclick="cancellaCronologiaNodi()">❌ Nodi</button>
+			</div>      
+		</div>
+		
+		<!-- Stato della connessione ancorato stabilmente a DESTRA -->
+		<div id="status" class="status-badge offline" style="position: absolute; right: 20px; 
+		display: flex; align-items: center;">Connessione...</div>
+	</div>
     <div class="container">
         <div class="sidebar-left">
             <h3>💬 Messaggi Chat Mesh</h3>
@@ -1330,7 +1373,7 @@ html_content = """
             <div id="nodesContainer"></div>
         </div>
     </div>
-    <script>
+<script>
 let ws;
 let nodoSelezionato = null;
 
@@ -1546,15 +1589,24 @@ sendBtn.onclick = () => {
         second: '2-digit'
     });
 
+    // Trova l'indice del '!'
+    let idNodo = dest;
+	const indice = dest.indexOf('!');
+	
+	if (indice !== -1) {
+		// Taglia dall'indice del '!' fino alla fine della stringa
+	    idNodo = dest.substring(indice);
+	}  
+
     // 🔥 1. mostro subito in chat
-    const msgEl = addMessage("a: " + dest + "<br>" + msg, "sending");
+    const msgEl = addMessage("a: " + idNodo + "<br>" + msg, "sending");
     
     ws.send(JSON.stringify({
         tipo: "chat",
         messaggio: msg,
         to: dest
     }));
-    
+        
     salvaMessaggio("Tu", dest, msg, ora);
 
     // salvo riferimento per update
@@ -1583,7 +1635,16 @@ checkSendBtn.onclick = () => {
         to: dest
     };
 
-    const msgEl = addMessage("🔍 Verifica traceroute <br>a: " + dest, "sending");
+    // Trova l'indice del '!'
+    let idNodo = dest;
+	const indice = dest.indexOf('!');
+	
+	if (indice !== -1) {
+		// Taglia dall'indice del '!' fino alla fine della stringa
+	    idNodo = dest.substring(indice);
+	}  
+
+    const msgEl = addMessage("🔍 Verifica traceroute <br>a: " + idNodo, "sending");
 
     ws.send(JSON.stringify({
         tipo: "traceroute",
@@ -1983,8 +2044,17 @@ function caricaMessaggi() {
         localStorage.getItem("chat_messages") || "[]"
     );
 
-
     messaggi.forEach(m => {
+    	const nodo = m.dest;
+		// Trova l'indice del '!'
+		const indice = nodo.indexOf('!');
+		
+		if (indice !== -1) {
+			// Taglia dall'indice del '!' fino alla fine della stringa
+			m.dest = nodo.substring(indice);
+			console.log(m.dest); 
+		}  
+
         addMessageBack(
             `<span style="color:#00bfff;">da:</span> ${m.mitt}<br>
              <span style="color:#ffcc00;">a:</span> ${m.dest}<br>
@@ -2001,6 +2071,23 @@ function caricaMessaggi() {
 function cancellaCronologia() {
     localStorage.removeItem("chat_messages");
     document.getElementById("chatBox").innerHTML = "";
+}
+
+// -------------------------
+// PURGE NODE
+// -------------------------
+function cancellaCronologiaNodi() {
+    localStorage.removeItem("meshtastic_nodes");
+    
+    document.getElementById("nodesContainer").innerHTML = "";
+    
+    dizionarioNodi.clear();
+       
+    nodesContainer.innerHTML = "";
+
+    const nodiArray = Array.from(dizionarioNodi.values());
+    nodeCountLabel.textContent = nodiArray.length;
+
 }
 
 // -------------------------
@@ -2063,8 +2150,19 @@ function connettiWebSocket() {
             const con = document.getElementById("msgInput");
             const msg = con.value;
         
-            if (data.ok) {
-                const msgEl = addMessage("🟢 Percorso verificato <br>a: " + dest + "<br>" + messaggioOld, "sending");
+            if (data.ok) {      
+                // Trova l'indice del '!'
+				let idNodo = dest;
+				const indice = dest.indexOf('!');
+				
+				if (indice !== -1) {
+					// Taglia dall'indice del '!' fino alla fine della stringa
+					idNodo = dest.substring(indice);
+					console.log("NODO PURGATO"); // Output: !3d6e2a1b
+					console.log(idNodo); // Output: !3d6e2a1b
+				}  
+          
+                const msgEl = addMessage("🟢 Percorso verificato <br>a: " + idNodo + "<br>" + messaggioOld, "sending");
                 msgInput.value = "";
             } else {
                 msgInput.value = "";
